@@ -1,50 +1,322 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Timeline</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ChronoMind — AI Timelines</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-50 text-gray-900">
+  <header class="bg-indigo-600 text-white p-6">
+    <div class="max-w-5xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <h1 class="text-2xl md:text-3xl font-bold">ChronoMind</h1>
+        <p class="text-indigo-100 mt-1">Explore AI through curated, Wikipedia-powered timelines.</p>
+      </div>
 
-  <header class="p-6 text-center bg-indigo-600 text-white">
-    <h1 id="timeline-title" class="text-3xl font-bold">Loading...</h1>
-    <p id="timeline-description" class="mt-2 text-lg"></p>
+      <div class="flex flex-col sm:flex-row sm:items-center gap-3 mt-3 sm:mt-0">
+        <div>
+          <label class="sr-only" for="timeline-select">Timeline</label>
+          <select id="timeline-select" class="rounded p-2 text-black">
+            <!-- filled by JS -->
+          </select>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <input id="search" placeholder="Search events or year (e.g., 2016, AlphaGo)" class="p-2 rounded" />
+          <button id="clear-search" title="Clear" class="px-3 py-2 bg-indigo-700 rounded text-white">Clear</button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <input id="year-input" placeholder="Jump to year (e.g., 1997)" class="p-2 rounded w-28" />
+          <button id="jump-year" class="px-3 py-2 bg-indigo-700 rounded text-white">Go</button>
+        </div>
+      </div>
+    </div>
   </header>
 
-  <main class="max-w-3xl mx-auto p-6">
-    <div id="timeline" class="space-y-8"></div>
+  <main class="max-w-5xl mx-auto p-6">
+    <section class="mb-6">
+      <h2 id="timeline-title" class="text-2xl font-semibold">Loading…</h2>
+      <p id="timeline-description" class="text-gray-700 mt-1"></p>
+    </section>
+
+    <section id="controls" class="flex items-center gap-3 mb-6">
+      <small class="text-gray-600">Showing <span id="count">0</span> events</small>
+      <button id="sort-toggle" class="ml-auto px-3 py-1 border rounded">Sort: Chronological</button>
+      <button id="force-refresh" class="px-3 py-1 border rounded">Refresh (clear cache)</button>
+    </section>
+
+    <section id="timeline" class="space-y-6">
+      <!-- cards appended here -->
+    </section>
   </main>
 
-  <script>
-    async function loadTimeline() {
-      // load local JSON (put ai-history.json in same folder)
-      const res = await fetch("ai-history.json");
-      const data = await res.json();
+  <footer class="text-center p-6 text-sm text-gray-600">
+    Built with 💡 + Wikipedia • <span id="cache-info"></span>
+  </footer>
 
-      document.getElementById("timeline-title").textContent = data.timelineTitle;
-      document.getElementById("timeline-description").textContent = data.description;
+<script>
+/* ========== Config: available timelines (seed files) ========== */
+const TIMELINES = [
+  { label: "AI History", file: "ai-history.json" },
+  { label: "AI in Pop Culture", file: "ai-popculture.json" },
+  { label: "AI & Creativity", file: "ai-creativity.json" }
+];
 
-      const container = document.getElementById("timeline");
-      data.events.forEach(event => {
-        const card = document.createElement("div");
-        card.className = "bg-white shadow p-4 rounded-lg border-l-4 border-indigo-600";
+/* ========== Utilities ========== */
+const $ = sel => document.querySelector(sel);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-        card.innerHTML = `
-          <div class="flex items-center mb-2">
-            <span class="text-indigo-600 font-bold mr-2">${event.date}</span>
-            <h2 class="text-xl font-semibold">${event.title}</h2>
-          </div>
-          <p class="mb-2">${event.summary}</p>
-          ${event.image ? `<img src="${event.image}" alt="${event.title}" class="w-full h-48 object-cover rounded mb-2">` : ""}
-          <a href="${event.source}" target="_blank" class="text-indigo-600 hover:underline">Read more →</a>
-        `;
-        container.appendChild(card);
-      });
+/* ========== DOM refs ========== */
+const selectEl = $("#timeline-select");
+const titleEl = $("#timeline-title");
+const descEl = $("#timeline-description");
+const timelineEl = $("#timeline");
+const countEl = $("#count");
+const cacheInfoEl = $("#cache-info");
+const searchEl = $("#search");
+const clearSearchBtn = $("#clear-search");
+const yearInput = $("#year-input");
+const jumpBtn = $("#jump-year");
+const sortToggle = $("#sort-toggle");
+const refreshBtn = $("#force-refresh");
+
+/* ========== App state ========== */
+let currentData = null;         // full timeline seed + wiki enrichments
+let sortChrono = true;
+const CACHE_PREFIX = "chronomind:wiki:";
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+/* ========== Bootstrap UI ========== */
+function populateSelect() {
+  TIMELINES.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.file;
+    opt.textContent = t.label;
+    selectEl.appendChild(opt);
+  });
+}
+populateSelect();
+
+/* ========== Caching helpers ========== */
+function saveCache(key, value) {
+  const payload = { ts: Date.now(), v: value };
+  try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(payload)); } catch(e){}
+}
+function loadCache(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (Date.now() - p.ts > CACHE_TTL_MS) { localStorage.removeItem(CACHE_PREFIX + key); return null; }
+    return p.v;
+  } catch(e){ return null; }
+}
+function clearAllCache() {
+  Object.keys(localStorage).forEach(k => { if (k.startsWith(CACHE_PREFIX)) localStorage.removeItem(k); });
+}
+
+/* ========== Wikipedia fetch with caching & graceful fallback ========== */
+async function fetchWiki(title) {
+  if (!title) return { title: title||"Unknown", extract: "", thumbnail: null, url: "" };
+  const key = `page:${title}`;
+  const cached = loadCache(key);
+  if (cached) return cached;
+
+  const endpoint = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
+  try {
+    const res = await fetch(endpoint);
+    if (!res.ok) throw new Error("no wiki");
+    const json = await res.json();
+    const item = {
+      title: json.title || title,
+      extract: json.extract || "",
+      thumbnail: json.thumbnail ? json.thumbnail.source : null,
+      url: (json.content_urls && json.content_urls.desktop && json.content_urls.desktop.page) || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`
+    };
+    saveCache(key, item);
+    return item;
+  } catch (err) {
+    // fallback to minimal
+    const fallback = { title, extract: "", thumbnail: null, url: `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}` };
+    saveCache(key, fallback);
+    return fallback;
+  }
+}
+
+/* ========== Rendering ========== */
+function renderCard(event, wikiData, idx) {
+  const card = document.createElement("article");
+  card.className = "bg-white p-4 rounded-lg shadow border-l-4 border-indigo-600 flex flex-col md:flex-row gap-4";
+  card.dataset.title = (wikiData.title || "").toLowerCase();
+  card.dataset.extract = (wikiData.extract || "").toLowerCase();
+  card.dataset.date = event.date || "";
+
+  const imgHtml = wikiData.thumbnail
+    ? `<img data-src="${wikiData.thumbnail}" loading="lazy" alt="${escapeHtml(wikiData.title)}" class="w-full md:w-56 h-36 object-cover rounded">`
+    : `<div class="w-full md:w-56 h-36 bg-gray-100 rounded flex items-center justify-center text-sm text-gray-500">no image</div>`;
+
+  card.innerHTML = `
+    <div class="md:flex-shrink-0">${imgHtml}</div>
+    <div class="flex-1">
+      <div class="flex items-start justify-between">
+        <div>
+          <h3 class="text-xl font-semibold">${escapeHtml(wikiData.title)}</h3>
+          <div class="text-sm text-indigo-600 font-semibold">${escapeHtml(event.date)}</div>
+        </div>
+        <div class="text-right text-xs text-gray-500">#${idx+1}</div>
+      </div>
+      <p class="mt-2 text-gray-700">${escapeHtml(truncate(wikiData.extract || event.summary || "No description available." , 280))}</p>
+      <div class="mt-3">
+        <a href="${wikiData.url}" target="_blank" class="text-indigo-600 hover:underline">Read more →</a>
+      </div>
+    </div>
+  `;
+  return card;
+}
+
+function truncate(s, n) { return s.length > n ? s.slice(0,n-1) + "…" : s; }
+function escapeHtml(s = "") {
+  return s.replaceAll && s.replaceAll(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ========== Main load: load seed JSON and enrich via wiki ========== */
+async function loadTimeline(file) {
+  try {
+    titleEl.textContent = "Loading…";
+    descEl.textContent = "";
+    timelineEl.innerHTML = `<div class="p-6 text-center text-gray-600">Fetching timeline data…</div>`;
+    const res = await fetch(file);
+    if (!res.ok) throw new Error("failed to load seed JSON");
+    const seed = await res.json();
+
+    titleEl.textContent = seed.timelineTitle || "Untitled Timeline";
+    descEl.textContent = seed.description || "";
+
+    // enrich sequentially to be kind to API; use caching
+    const enriched = [];
+    for (const ev of (seed.events || [])) {
+      const wiki = await fetchWiki(ev.wiki || ev.title || "");
+      enriched.push({...ev, wikiData: wiki});
     }
+    currentData = { seed, enriched };
+    renderTimeline();
+    updateCacheInfo();
+  } catch (err) {
+    timelineEl.innerHTML = `<div class="p-6 text-red-600">Error loading timeline: ${err.message}</div>`;
+  }
+}
 
-    loadTimeline();
-  </script>
+/* ========== Render currently loaded timeline with filters/sort ========== */
+function renderTimeline(filterText="", yearFilter=null) {
+  if (!currentData) return;
+  let list = [...currentData.enriched];
+
+  // apply year filter (exact or substring)
+  if (yearFilter) list = list.filter(e => (e.date||"").includes(String(yearFilter)));
+
+  // apply search filter (search title+extract+seed title)
+  const q = (filterText||"").trim().toLowerCase();
+  if (q) {
+    list = list.filter(e => {
+      const t = (e.wikiData.title || "").toLowerCase();
+      const x = (e.wikiData.extract || "").toLowerCase();
+      const s = (e.title || e.wiki || "").toLowerCase();
+      return t.includes(q) || x.includes(q) || s.includes(q) || (e.date||"").includes(q);
+    });
+  }
+
+  // sort
+  list.sort((a,b) => {
+    const ad = parseDateSortable(a.date), bd = parseDateSortable(b.date);
+    return sortChrono ? (ad - bd) : (bd - ad);
+  });
+
+  // render
+  timelineEl.innerHTML = "";
+  countEl.textContent = list.length;
+  list.forEach((e, idx) => {
+    const card = renderCard(e, e.wikiData || {}, idx);
+    timelineEl.appendChild(card);
+  });
+
+  // kick lazy image loading (small perf-friendly loader)
+  initiateLazyImages();
+}
+
+/* parse a date string into sortable number (best-effort) */
+function parseDateSortable(d) {
+  if (!d) return 0;
+  // try YYYY-MM-DD or YYYY
+  const m = d.match(/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/);
+  if (!m) return 0;
+  const y = Number(m[1]), mo = Number(m[2]||1), da = Number(m[3]||1);
+  return y*10000 + mo*100 + da;
+}
+
+/* ========== Lazy image loader (sets src from data-src) ========== */
+function initiateLazyImages() {
+  const imgs = [...document.querySelectorAll('img[data-src]')];
+  if ('IntersectionObserver' in window) {
+    const obs = new IntersectionObserver((entries, observer) => {
+      entries.forEach(en => {
+        if (en.isIntersecting) {
+          const img = en.target;
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+          observer.unobserve(img);
+        }
+      });
+    }, {rootMargin: "200px"});
+    imgs.forEach(i => obs.observe(i));
+  } else {
+    // fallback: load immediately
+    imgs.forEach(i => { i.src = i.dataset.src; i.removeAttribute('data-src'); });
+  }
+}
+
+/* ========== Controls wiring ========== */
+selectEl.addEventListener('change', e => {
+  loadTimeline(e.target.value);
+});
+searchEl.addEventListener('input', debounce(e => {
+  renderTimeline(e.target.value, yearInput.value.trim() || null);
+}, 300));
+clearSearchBtn.addEventListener('click', () => {
+  searchEl.value = ""; renderTimeline("", yearInput.value.trim() || null);
+});
+jumpBtn.addEventListener('click', () => {
+  const y = yearInput.value.trim();
+  renderTimeline(searchEl.value, y || null);
+});
+sortToggle.addEventListener('click', () => {
+  sortChrono = !sortChrono;
+  sortToggle.textContent = sortChrono ? 'Sort: Chronological' : 'Sort: Reverse';
+  renderTimeline(searchEl.value, yearInput.value.trim() || null);
+});
+refreshBtn.addEventListener('click', () => {
+  clearAllCache();
+  loadTimeline(selectEl.value);
+});
+
+/* ========== misc helpers ========== */
+function debounce(fn, wait = 250) {
+  let t;
+  return (...a) => { clearTimeout(t); t = setTimeout(()=>fn(...a), wait); };
+}
+
+function updateCacheInfo(){
+  const keys = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
+  cacheInfoEl.textContent = `${keys.length} cached pages`;
+}
+
+/* ========== initial run ========== */
+(async function init(){
+  // populate select already done. load default timeline
+  selectEl.value = TIMELINES[0].file;
+  await loadTimeline(selectEl.value);
+})();
+</script>
 </body>
 </html>
