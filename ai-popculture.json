@@ -1,0 +1,12 @@
+{
+  "timelineTitle": "AI in Pop Culture",
+  "description": "How artificial intelligence has been portrayed in films, books, and games.",
+  "events": [
+    { "date": "1968", "wiki": "HAL 9000" },
+    { "date": "1984", "wiki": "Skynet" },
+    { "date": "1999", "wiki": "The Matrix" },
+    { "date": "2013", "wiki": "Her (film)" },
+    { "date": "2015", "wiki": "Ex Machina (film)" },
+    { "date": "2014", "wiki": "Westworld" }
+  ]
+}
